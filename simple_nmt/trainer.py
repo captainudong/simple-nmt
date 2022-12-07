@@ -201,6 +201,10 @@ class MaximumLikelihoodEstimationEngine(Engine):
 
     @staticmethod
     def save_model(engine, train_engine, config, src_vocab, tgt_vocab):
+
+        if train_engine.state.epoch < 17:
+            return
+
         avg_train_loss = train_engine.state.metrics['loss']
         avg_valid_loss = engine.state.metrics['loss']
 
