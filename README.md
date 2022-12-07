@@ -1,157 +1,80 @@
 # Simple Neural Machine Translation (Simple-NMT)
 
-This repo contains a simple source code for advanced neural machine translation based on Sequence-to-Sequence and Transformer.
-Most open sources have unnecessarily too complicated structures, because they have too many features more than people's expected.
-I believe that this repo has minimal features to build NMT system.
-Therefore, I hope that this repo can be a good start for people who doesn't want unnecessarily many features.
+김기현님의 코드를 기반으로 Transformer를 활용한 기계번역 실습 내용을 담았습니다.  
+AWS ec2 t2.large(ubuntu22.04LTS, 스토리지 30GiB) 인스턴스를 활용했습니다.  
+메모리 부족으로 스왑 메모리를 할당하였으며 해당 코드는 아래와 같습니다.
+```bash
+$ sudo dd if=/dev/zero of=/swapfile bs=128M count=16
+$ sudo chmod 600 /swapfile
+$ sudo mkswap /swapfile
+$ sudo swapon /swapfile
+$ sudo swapon -s
+$ cd /
+$ sudo nano /etc/fstab # 마지막에 다음과 같이 줄을 추가하고 Ctrl+X를 눌러 저장해주세요. /swapfile swap swap defaults 0 0
+$ free # 잘 할당되었는지 확인
+```
 
-Also, this repo is for [lecture](https://www.fastcampus.co.kr/data_camp_nlpadv/) and [book](https://kh-kim.gitbook.io/natural-language-processing-with-pytorch/), what I conduct.
-Please, refer those sites for further information.
+## Setup
 
-## Features
+```bash
+$ git clone https://github.com/captainudong/simple-nmt.git
+```
 
-This repo provides many features, and many of those codes were written from scratch. (e.g. Transformer and Beam search)
+TorchText는 0.5 혹은 0.6 버전 설치를 권장하며 Mecab 설치 코드를 새로 작성했습니다.
+아래와 같이 셸 스크립트를 실행하여 필요한 모듈을 모두 설치할 수 있습니다.
+```bash
+$ cd ~/simple-nmt/data
+$ bash pdw_setup.sh
+$ bash pdw_install_mecab.sh
+```
 
-- [LSTM sequence-to-sequence with attention](http://aclweb.org/anthology/D15-1166)
-- [Transformer](https://arxiv.org/abs/1706.03762)
-  - Pre-Layer Normalized Transformer
-  - Rectified Adam
-- Reinforcement learning for fine-tuning like [Minimum Risk Training (MRT)](https://arxiv.org/abs/1512.02433)
-- [Dual Supervised Learning](https://arxiv.org/abs/1707.00415)
-- Beam search with mini-batch in parallel
-- Gradient accumulation
-- Mixed precision training
+## Data Pre-Processing
+AI-Hub의 한국어-영어 병렬 데이터를 사용하였으며 1_구어체(1) 1개의 파일만 사용했습니다.  
+excel파일을 tsv파일(탭으로 분리한 txt파일, 인코딩 utf-8)로 저장하여 로컬->ec2로 전송했습니다.
+학습 시간이 오래 걸려 총 12,000개의 데이터만 사용하였고 Train, Valid, Test 데이터를 각각 8,000개, 2,000개 2,000개로 나눴습니다.
+```bash
+$ head -n 12000 1_구어체\(1\).txt > corpus.tsv
+$ shuf ./corpus.tsv > corpus.shuf.tsv
+$ head -n 8000 corpus.shuf.tsv > corpus.shuf.train.tsv
+$ tail -n 4000 corpus.shuf.tsv | head -n 2000 > corpus.shuf.valid.tsv
+$ tail -n 2000 corpus.shuf.tsv > corpus.shuf.test.tsv
 
-### Implemented Optimization Algorithms
+$ cut -f1 corpus.shuf.train.tsv > corpus.shuf.train.ko; cut -f2 corpus.shuf.train.tsv > corpus.shuf.train.en
+$ cut -f1 corpus.shuf.valid.tsv > corpus.shuf.valid.ko; cut -f2 corpus.shuf.valid.tsv > corpus.shuf.valid.en
+$ cut -f1 corpus.shuf.test.tsv > corpus.shuf.test.ko; cut -f2 corpus.shuf.test.tsv > corpus.shuf.test.en
+```
 
-#### Maximum Likelihood Estimation (MLE)
+### Tokenize
+기존의 tokenizer.py 파일로 tokenize를 실행한 결과 특수문자가 &apos와 같이 변환되는 이슈가 있어 pdw_tokenizer.py 파일을 새로 작성했습니다.
+```bash
+$ cat ./corpus.shuf.train.ko | mecab -O wakati | python3 ./post_tokenize.py ./corpus.shuf.train.ko > ./corpus.shuf.train.tok.ko
+$ cat ./corpus.shuf.valid.ko | mecab -O wakati | python3 ./post_tokenize.py ./corpus.shuf.valid.ko > ./corpus.shuf.valid.tok.ko
+$ cat ./corpus.shuf.test.ko | mecab -O wakati | python3 ./post_tokenize.py ./corpus.shuf.test.ko > ./corpus.shuf.test.tok.ko
 
-<!-- $$\begin{gathered}
-\mathcal{D}=\{(x_i,y_i\}_{i=1}^N \\
-\\
-\hat{\theta}\leftarrow\theta-\eta\nabla_\theta\mathcal{L}(\theta) \\
-\mathcal{L}(\theta)=-\sum_{i=1}^N{\log{P(y_i|x_i;\theta)}}
-\end{gathered}$$ -->
+$ cat ./corpus.shuf.train.en | python3 ./pdw_tokenizer.py | python3 ./post_tokenize.py ./corpus.shuf.train.en > ./corpus.shuf.train.tok.en
+$ cat ./corpus.shuf.valid.en | python3 ./pdw_tokenizer.py | python3 ./post_tokenize.py ./corpus.shuf.valid.en > ./corpus.shuf.valid.tok.en
+$ cat ./corpus.shuf.test.en | python3 ./pdw_tokenizer.py | python3 ./post_tokenize.py ./corpus.shuf.test.en > ./corpus.shuf.test.tok.en
+```
 
-![](./tex/287076bf1e54cf080ee5e6c6d9432270.svg)
+### Subword Segmentation
+```bash
+$ python3 ./subword-nmt/learn_bpe.py --input ./corpus.shuf.train.tok.en --output bpe.en.model --symbols 20000 --verbose
+$ python3 ./subword-nmt/learn_bpe.py --input ./corpus.shuf.train.tok.ko --output bpe.ko.model --symbols 30000 --verbose
 
-#### Minimum Risk Training (MRT)
+$ cat ./corpus.shuf.train.tok.ko | python3 subword-nmt/apply_bpe.py -c ./bpe.ko.model > ./corpus.shuf.train.tok.bpe.ko
+$ cat ./corpus.shuf.valid.tok.ko | python3 subword-nmt/apply_bpe.py -c ./bpe.ko.model > ./corpus.shuf.valid.tok.bpe.ko
+$ cat ./corpus.shuf.test.tok.ko | python3 subword-nmt/apply_bpe.py -c ./bpe.ko.model > ./corpus.shuf.test.tok.bpe.ko
 
-<!-- $$\begin{gathered}
-\nabla_\theta\mathcal{L}(\theta)=\nabla_\theta\sum_{i=1}^N{}{
-    -\Big(\text{reward}(y_i,\hat{y}_i)-\frac{1}{K}\sum_{k=1}^K{
-        \text{reward}(y_i,\hat{y}_{i,k})
-    }\Big)\times\log{P(\hat{y}_i|x_i;\theta)}
-}, \\
-\text{where }\hat{y}_i\sim{P(\text{y}|x_i;\theta)}.
-\end{gathered}$$ -->
+$ cat ./corpus.shuf.train.tok.en | python3 subword-nmt/apply_bpe.py -c ./bpe.en.model > ./corpus.shuf.train.tok.bpe.en
+$ cat ./corpus.shuf.valid.tok.en | python3 subword-nmt/apply_bpe.py -c ./bpe.en.model > ./corpus.shuf.valid.tok.bpe.en
+$ cat ./corpus.shuf.test.tok.en | python3 subword-nmt/apply_bpe.py -c ./bpe.en.model > ./corpus.shuf.test.tok.bpe.en
+```
 
-![](./tex/9adfbd5b3e9441850e393098e3337a1a.svg)
 
-#### Dual Supervised Learning (DSL)
+## Training
+CrossEntropyLoss가 번역 품질을 정확하게 나타내지 않기 때문에 기존의 trainer.py 파일은 모든 에포크마다 모델을 저장하도록 되어있습니다. 스토리지 부담을 줄이기 위해 203번째 줄 save_model()함수를 26epoch부터 저장하도록 수정했습니다.
 
-<!-- $$\begin{gathered}
-\theta_{x\rightarrow{y}}\leftarrow\theta_{x\rightarrow{y}}-\eta\nabla_{\theta_{x\rightarrow{y}}}\mathcal{L}(\theta_{x\rightarrow{y}}) \\
-\mathcal{L}(\theta_{x\rightarrow{y}})=-\sum_{i=1}^N{
-    \log{P(y_i|x_i;\theta_{x\rightarrow{y}})}
-}+\bigg\|
-    \Big(\log{P(y_i|x_i;\theta_{x\rightarrow{y}})}+\log{\hat{P}(x_i)}\Big)
-    -\Big(\log{P(x_i|y_i;\theta_{y\rightarrow{x}})}+\log{\hat{P}(y_i)}\Big)
-\bigg\|_2^2
-\end{gathered}$$ -->
-
-![](./tex/ca879c9675054d376d7486ef21cc5317.svg)
-
-## Requirements
-
-- Python 3.6 or higher
-- PyTorch 1.6 or higher
-- TorchText 0.5 or higher
-- PyTorch Ignite
-- [torch-optimizer 0.0.1a15](https://pypi.org/project/torch-optimizer/)
-
-## Evaluation
-
-### Results
-
-First, following table shows an evaluation result for each algorithm.
-
-||enko|koen|
-|:-:|:-:|:-:|
-|Sequence-to-Sequence|32.53|29.67|
-|Sequence-to-Sequence (MRT)|34.04|31.24|
-|Sequence-to-Sequence (DSL)|33.47|31.00|
-|Transformer|34.96|31.84|
-|Transformer (MRT)|-|-|
-|Transformer (DSL)|35.48|32.80|
-
-As you can see, Transformer outperforms in ENKO/KOEN task.
-Note that it was unable to run MRT on Transformer, due to lack of memory.
-
-Following table shows the result based on beam-size on Sequence-to-Sequence model.
-Table shows that beam search improve BLEU score without data adding and model change.
-
-|beam_size|enko|koen|
-|:-:|:-:|:-:|
-|1|31.65|28.93|
-|5|32.53|29.67|
-|10|32.48|29.37|
-
-### Setup
-
-In order to evaluate this project, I used public dataset from [AI-HUB](https://aihub.or.kr/), which provides 1,600,000 pairs of sentence.
-I randomly split this data into train/valid/test set by following number of lines each.
-In fact, original test set, which has about 200000 lines, is too big to take bunch of evaluations, I reduced it to 1,000 lines.
-(In other words, you can get better model, if you put removed 199,000 lines into training set.)
-
-|set|lang|#lines|#tokens|#characters|
-|-|-|-|-|-|
-|train|en|1,200,000|43,700,390|367,477,362|
-||ko|1,200,000|39,066,127|344,881,403|
-|valid|en|200,000|7,286,230|61,262,147|
-||ko|200,000|6,516,442|57,518,240|
-|valid-1000|en|1,000|36,307|305,369|
-||ko|1,000|32,282|285,911|
-|test-1000|en|1,000|35,686|298,993|
-||ko|1,000|31,720|280,126|
-
-Each dataset is tokenized with Mecab/MosesTokenizer and BPE.
-After preprocessing, each language has vocabulary size like as below:
-
-|en|ko|
-|-|-|
-|20,525|29,411|
-
-Also, we have following hyper-parameters for each model to proceed a evaluation.
-Note that both architectures have small number of parameters, because I don't have enough corpus.
-You need to increase the number of parameters, if you have more corpus.
-
-|parameter|seq2seq|transformer|
-|-|-|-|
-|batch_size|320|4096|
-|word_vec_size|512| - |
-|hidden_size|768|768|
-|n_layers|4|4|
-|n_splits| - |8|
-|n_epochs|30|30|
-
-Below is a table for hyper-parameters for each algorithm.
-
-|parameter|MLE|MRT|DSL|
-|-|-|-|-|
-|n_epochs|30|30 + 40|30 + 10|
-|optimizer|Adam|SGD|Adam|
-|lr|1e-3|1e-2|1e-2|
-|max_grad_norm|1e+8|5|1e+8 $\rightarrow$ 5|
-
-Please, note that MRT has different optimization setup.
-
-## Usage
-
-I recommend to use corpora from [AI-Hub](http://www.aihub.or.kr/), if you are trying to build Kor/Eng machine translation.
-
-### Training
-
+### 사용법
 ```bash
 >> python train.py -h
 usage: train.py [-h] --model_fn MODEL_FN --train TRAIN --valid VALID --lang
@@ -231,122 +154,18 @@ optional arguments:
                         Transformer. Default=8
 ```
 
-example usage:
+### Example Usage
 
-#### Seq2Seq
-
+ec2 ssh 연결이 끊어져도 실행될 수 있도록 합니다.
 ```bash
->> python train.py --train ./data/corpus.shuf.train.tok.bpe --valid ./data/corpus.shuf.valid.tok.bpe --lang enko \
---gpu_id 0 --batch_size 128 --n_epochs 30 --max_length 100 --dropout .2 \
---word_vec_size 512 --hidden_size 768 --n_layers 4 --max_grad_norm 1e+8 --iteration_per_update 2 \
---lr 1e-3 --lr_step 0 --use_adam --rl_n_epochs 0 \
---model_fn ./model.pth
+$ nohup python3 train.py --train ./data/corpus.shuf.train.tok.bpe --valid ./data/corpus.shuf.valid.tok.bpe --lang koen --batch_size 128 --n_epochs 10 --max_length 30 --dropout .2 --hidden_size 768 --n_layers 4 --max_grad_norm 1e+8 --iteration_per_update 32 --lr 1e-3 --lr_step 0 --use_adam --use_transformer --rl_n_epochs 0 --model_fn ./model_koen.pth &
+$ disown
 ```
 
-#### To continue with RL training
-
+진행현황을 실시간으로 보고 싶다면 아래와 같이 명령어를 입력하여 로그를 볼 수 있습니다.
 ```bash
->> python continue_train.py --load_fn ./model.pth --model_fn ./model.rl.pth \
---init_epoch 31 --iteration_per_update 1 --max_grad_norm 5
+$ tail -f ./nohup.out
 ```
 
-#### Transformer
 
-```bash
->> python train.py --train ./data/corpus.shuf.train.tok.bpe --valid ./data/corpus.shuf.valid.tok.bpe --lang enko \
---gpu_id 0 --batch_size 128 --n_epochs 30 --max_length 100 --dropout .2 \
---hidden_size 768 --n_layers 4 --max_grad_norm 1e+8 --iteration_per_update 32 \
---lr 1e-3 --lr_step 0 --use_adam --use_transformer --rl_n_epochs 0 \
---model_fn ./model.pth
-```
-
-#### Dual Supervised Learning
-
-LM Training:
-```bash
->> python lm_train.py --train ./data/corpus.shuf.train.tok.bpe --valid ./data/corpus.shuf.valid.tok.bpe --lang enko \
---gpu_id 0 --batch_size 256 --n_epochs 20 --max_length 64 --dropout .2 \
---word_vec_size 512 --hidden_size 768 --n_layers 4 --max_grad_norm 1e+8 \
---model_fn ./lm.pth
-```
-
-DSL using pretrained LM:
-```bash
->> python dual_train.py --train ./data/corpus.shuf.train.tok.bpe --valid ./data/corpus.shuf.valid.tok.bpe --lang enko \
---gpu_id 0 --batch_size 64 --n_epochs 40 --max_length 64 --dropout .2 \
---word_vec_size 512 --hidden_size 768 --n_layers 4 --max_grad_norm 1e+8 --iteration_per_update 4 \
---dsl_n_warmup_epochs 30 --dsl_lambda 1e-2 \
---lm_fn ./lm.pth \
---model_fn ./model.pth
-```
-
-Note that I recommend to use different 'max_grad_norm value' (e.g. 5) for after warm-up training. You can use 'continue_dual_train.py' to change 'max_grad_norm' argument.
-
-### Inference
-
-You can translate any sentence via standard input and output.
-
-```bash
->> python translate.py -h
-usage: translate.py [-h] --model_fn MODEL_FN [--gpu_id GPU_ID]
-                    [--batch_size BATCH_SIZE] [--max_length MAX_LENGTH]
-                    [--n_best N_BEST] [--beam_size BEAM_SIZE] [--lang LANG]
-                    [--length_penalty LENGTH_PENALTY]
-
-optional arguments:
-  -h, --help            show this help message and exit
-  --model_fn MODEL_FN   Model file name to use
-  --gpu_id GPU_ID       GPU ID to use. -1 for CPU. Default=-1
-  --batch_size BATCH_SIZE
-                        Mini batch size for parallel inference. Default=128
-  --max_length MAX_LENGTH
-                        Maximum sequence length for inference. Default=255
-  --n_best N_BEST       Number of best inference result per sample. Default=1
-  --beam_size BEAM_SIZE
-                        Beam size for beam search. Default=5
-  --lang LANG           Source language and target language. Example: enko
-  --length_penalty LENGTH_PENALTY
-                        Length penalty parameter that higher value produce
-                        shorter results. Default=1.2
-```
-
-example usage:
-
-```bash
->> python translate.py --model_fn ./model.pth --gpu_id 0 --lang enko < test.txt > test.result.txt
-```
-
-You may also need to change the argument parameters.
-
-## Translation Examples
-
-Below table shows that result from both MLE and MRT in Korean-English translation task.
-
-|INPUT|REF|MLE|MRT|
-|-|-|-|-|
-|우리는 또한 그 지역의 생선 가공 공장에서 심한 악취를 내며 썩어가는 엄청난 양의 생선도 치웠습니다.|We cleared tons and tons of stinking, rotting fish carcasses from the local fish processing plant.|We also had a huge stink in the fish processing plant in the area, smelling havoc with a huge amount of fish.|We also cleared a huge amount of fish that rot and rot in the fish processing factory in the area.|
-|회사를 이전할 이상적인 장소이다.|It is an ideal place to relocate the company.|It's an ideal place to transfer the company.|It's an ideal place to transfer the company.|
-|나는 이것들이 내 삶을 바꾸게 하지 않겠어.|I won't let this thing alter my life.|I'm not gonna let these things change my life.|I won't let these things change my life.|
-|사람들이 슬퍼보인다.|Their faces appear tearful.|People seem to be sad.|People seem to be sad.|
-|아냐, 그런데 넌 그렇다고 생각해.|No, but I think you do.|No, but I think you do.|No, but you think it's.|
-|하지만, 나는 나중에 곧 잠들었다.|But I fell asleep shortly afterwards.|However, I fell asleep in a moment.|However, I fell asleep soon afterwards.|
-|하지만 1997년 아시아에 외환위기가 불어닥쳤다.|But Asia was hit hard by the 1997 foreign currency crisis.|In 1997, however, the financial crisis in Asia has become a reality for Asia.|But in 1997, the foreign currency crisis was swept in Asia.|
-|메이저 리그 공식 웹사이트에 따르면, 12월 22일, 추씨는 텍사스 레인져스와 7년 계약을 맺었다.|According to Major League Baseball's official website, on Dec. 22, Choo signed a seven year contract with the Texas Rangers.|According to the Major League official website on December 22, Choo signed a seven-year contract with Texas Rangers in Texas|According to the Major League official website on December 22, Choo made a seven-year contract with Texas Rangers.|
-|한 개인.|a private individual|a person of personal importance|a personal individual|
-|도로에 차가 꼬리를 물고 늘어서있다.|The traffic is bumper to bumper on the road.|The road is on the road with a tail.|The road is lined with tail on the road.|
-|내가 그렇게 늙지 않았다는 점을 지적해도 될까요.|Let me point out that I'm not that old.|You can point out that I'm not that old.|You can point out that I'm not that old.|
-|닐슨 시청률은 15분 단위 증감으로 시청률을 측정하므로, ABC, NBC, CBS 와 Fox 의 순위를 정하지 않았다.|Nielsen had no ratings for ABC, NBC, CBS and Fox because it measures their viewership in 15-minute increments.|The Nielsen ratings measured the viewer's ratings with increments for 15-minute increments, so they did not rank ABC, NBC, CBS and Fox.|Nielson ratings measured ratings with 15-minute increments, so they did not rank ABC, NBC, CBS and Fox.|
-|다시말해서, 학교는 교사 부족이다.|In other words, the school is a teacher short.|In other words, school is a teacher short of a teacher.|In other words, school is a lack of teacher.|
-|그 다음 몇 주 동안에 사태가 극적으로 전환되었다.|Events took a dramatic turn in the weeks that followed.|The situation has been dramatically changed for the next few weeks.|The situation was dramatically reversed for the next few weeks.|
-|젊은이들을 물리학에 대해 흥미를 붙일수 있게 할수 있는 가장 좋은 사람은 졸업생 물리학자이다.|The best possible person to excite young people about physics is a graduate physicist.|The best person to be able to make young people interested in physics is a self-thomac physicist.|The best person to make young people interested in physics is a graduate physicist.|
-|5월 20일, 인도는 팔로디 마을에서 충격적인 기온인 섭씨 51도를 달성하며, 가장 더운 날씨를 기록했습니다.|On May 20, India recorded its hottest day ever in the town of Phalodi with a staggering temperature of 51 degrees Celsius.|On May 20, India achieved its hottest temperatures, even 51 degrees Celsius, in the Palrody village, and recorded the hottest weather.|On May 20, India achieved 51 degrees Celsius, a devastating temperature in Paldydy town, and recorded the hottest weather.|
-|내말은, 가끔 바나는 그냥 바나나야.|I mean, sometimes a banana is just a banana.|I mean, sometimes a banana is just a banana.|I mean, sometimes a banana is just a banana.|
-
-## References
-
-- [[Luong et al., 2015](http://aclweb.org/anthology/D15-1166)] Effective Approaches to Attention-based Neural Machine Translation
-- [[Shen et al., 2015](https://arxiv.org/abs/1512.02433)] Minimum Risk Training for Neural Machine Translation
-- [[Sennrich et al., 2016](http://www.aclweb.org/anthology/P16-1162)] Neural Machine Translation of Rare Words with Subword Units
-- [[Wu et al, 2016](https://arxiv.org/abs/1609.08144)] Google's Neural Machine Translation System: Bridging the Gap between Human and Machine Translation
-- [[Vaswani et al., 2017](https://arxiv.org/abs/1706.03762)] Attention is All You Need
-- [[Xia et al., 2017](https://arxiv.org/abs/1707.00415)] Dual Supervised Learning
+학습 진행 중...
